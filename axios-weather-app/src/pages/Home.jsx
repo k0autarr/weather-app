@@ -8,6 +8,9 @@ import CloudBackground from "../components/CloudBackground";
 import { getCompleteCityWeather } from "../services/weatherApi";
 import { getCityImage } from "../services/imageApi";
 
+const FALLBACK_IMAGE =
+  "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=80";
+
 function getWeatherEmoji(main) {
   switch (main) {
     case "Clear":
@@ -123,6 +126,7 @@ function Home() {
       const savedCities = localStorage.getItem("weather_cities");
       return savedCities ? JSON.parse(savedCities) : [];
     } catch (error) {
+      console.error("Failed to parse saved cities:", error);
       return [];
     }
   });
@@ -137,19 +141,38 @@ function Home() {
   const defaultCities = useMemo(() => ["Berlin", "Paris", "New York"], []);
 
   const loadCityData = async (cityName) => {
-    const weatherBundle = await getCompleteCityWeather(cityName);
-    const image = await getCityImage(cityName);
+    try {
+      const weatherBundle = await getCompleteCityWeather(cityName);
 
-    return {
-      id: `${cityName}-${Date.now()}-${Math.random()}`,
-      city: weatherBundle.location.name,
-      country: weatherBundle.location.country,
-      temp: weatherBundle.current.main.temp,
-      condition: weatherBundle.current.weather?.[0]?.main || "Weather",
-      image,
-      current: weatherBundle.current,
-      forecast: weatherBundle.forecast,
-    };
+      let image = FALLBACK_IMAGE;
+
+      try {
+        image =
+          (await getCityImage(
+            weatherBundle.location.name,
+            weatherBundle.location.country
+          )) || FALLBACK_IMAGE;
+      } catch (imageError) {
+        console.error(
+          `Image fetch failed for ${weatherBundle.location.name}:`,
+          imageError
+        );
+      }
+
+      return {
+        id: `${cityName}-${Date.now()}-${Math.random()}`,
+        city: weatherBundle.location.name,
+        country: weatherBundle.location.country,
+        temp: weatherBundle.current.main.temp,
+        condition: weatherBundle.current.weather?.[0]?.main || "Weather",
+        image,
+        current: weatherBundle.current,
+        forecast: weatherBundle.forecast,
+      };
+    } catch (weatherError) {
+      console.error(`Weather fetch failed for ${cityName}:`, weatherError);
+      throw weatherError;
+    }
   };
 
   const initializeDefaultCities = async () => {
@@ -158,9 +181,42 @@ function Home() {
       setError("");
 
       if (cities.length > 0) {
-        setSelectedCity(cities[0]);
-        setSelectedWeather(cities[0].current);
-        setSelectedForecast(cities[0].forecast);
+        const fixedCities = await Promise.all(
+          cities.map(async (city) => {
+            try {
+              const needsRefresh =
+                !city.image ||
+                typeof city.image !== "string" ||
+                city.image.trim() === "" ||
+                city.image.includes("undefined") ||
+                city.image === FALLBACK_IMAGE;
+
+              if (needsRefresh) {
+                const newImage = await getCityImage(city.city, city.country);
+                return {
+                  ...city,
+                  image: newImage || FALLBACK_IMAGE,
+                };
+              }
+
+              return {
+                ...city,
+                image: city.image || FALLBACK_IMAGE,
+              };
+            } catch (imageError) {
+              console.error(`Failed to restore image for ${city.city}:`, imageError);
+              return {
+                ...city,
+                image: FALLBACK_IMAGE,
+              };
+            }
+          })
+        );
+
+        setCities(fixedCities);
+        setSelectedCity(fixedCities[0]);
+        setSelectedWeather(fixedCities[0].current);
+        setSelectedForecast(fixedCities[0].forecast);
         return;
       }
 
@@ -171,6 +227,7 @@ function Home() {
       setSelectedWeather(loadedCities[0].current);
       setSelectedForecast(loadedCities[0].forecast);
     } catch (err) {
+      console.error("Initialization failed:", err);
       setError("Could not load default cities. Check your API keys.");
     } finally {
       setBootLoading(false);
@@ -185,8 +242,8 @@ function Home() {
   useEffect(() => {
     try {
       localStorage.setItem("weather_cities", JSON.stringify(cities));
-    } catch (error) {
-      // ignore localStorage errors
+    } catch (storageError) {
+      console.error("Failed to save cities to localStorage:", storageError);
     }
   }, [cities]);
 
@@ -213,6 +270,7 @@ function Home() {
       setSelectedWeather(newCity.current);
       setSelectedForecast(newCity.forecast);
     } catch (err) {
+      console.error(`Failed to search city ${cityName}:`, err);
       setError("Invalid city name or API request failed.");
     } finally {
       setLoading(false);
